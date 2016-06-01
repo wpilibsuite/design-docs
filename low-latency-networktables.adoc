@@ -1,0 +1,181 @@
+= Low Latency NetworkTables
+:toc: macro
+:sectanchors:
+:source-highlighter: pygments
+:pygments-style: colorful
+:networktables3: https://github.com/wpilibsuite/ntcore/blob/master/doc/networktables3.adoc
+
+toc::[]
+
+== Summary
+
+This change to NetworkTables provides a way to flag individual values
+as low latency and update them more frequently and synchronously
+across the network.  This is done by transmitting updates to these
+values via UDP (rather than TCP) and providing a way to signal
+flushing of these values to the network.
+
+== Motivation
+
+The current NetworkTables protocol is implemented using only TCP.  To
+limit network traffic in the case of network congestion or dropouts,
+value updates are rate limited in software to once every 100 ms.  For
+the vast majority of values (such as configuration parameters) this
+latency is not an issue.  However, it is often desirable to update a
+handful of values in a more real-time, low latency fashion, such as
+when doing image processing (where a new frame may be processed every
+30 ms).
+
+== Design
+
+=== Protocol Specification Changes
+
+This section describes the required changes to the
+{networktables3}[NetworkTables 3.0 Protocol].  There are no changes to
+the initial handshake (other than the version number) or other TCP
+operations.  The only operational change is to send Entry Update
+messages for Low-Latency flagged entries via UDP rather than TCP.
+
+==== Protocol Revision
+
+Protocol revision greater than or equal to 3.1 (0x0301) indicate
+support for low-latency messaging.
+
+==== Transport Layer
+
+The Server should listen on UDP port 1735 for incoming low-latency
+messages.  The Client should listen on a UDP port starting at port
+1735 (to allow for multiple Clients on a single machine, higher port
+numbers, e.g. 1736, 1737, etc. may need to be used).
+
+==== Client Hello
+
+Add client UDP port to Client Hello message (when connecting with
+protocol revision 3.1).
+
+[cols="1,3"]
+|===
+|Field Name |Field Type
+
+|0x01 - Client Hello
+|1 byte, unsigned; Message Type
+
+|Client Protocol Revision
+|2 bytes, Unsigned 16-bit integer (big-endian). See
+<<def-protocol-revision,Protocol Revision>>.
+
+|Client UDP Port
+|2 bytes, Unsigned 16-bit integer (big-endian).
+
+|Client identity (name)
+|<<entry-value-string,String>>
+|===
+
+==== Client Updates an Entry
+
+When User Code on a Client updates the value of an Entry with the Low
+Latency flag set, the Client should send the associated Entry Update
+mesage to the Server via UDP, rather than TCP.  The Client should only
+send Entry Update messages for these Entries via TCP under the
+following conditions:
+
+* The Server is not version 3.1 or greater.
+
+* The Entry Update message would not fit within the MTU of the
+transmitting medium.  MTU path discovery is not required.  The Client
+should assume the MTU is no greater than 1500 bytes.
+
+When generating UDP packets, the Client should pack as many Entry
+Updates as possible within a single packet (respecting MTU), but the
+Entry Update messages must be aligned to each generated packet (e.g.
+the packet must start with the start of an Entry Update message).
+
+==== Server Updates an Entry
+
+When User Code on the Server updates the value of an Entry with the
+Low Latency flag set, the Server should send the associated Entry
+Update message via UDP, rather than TCP, to version 3.1 or greater
+Clients, in accordance with the previous section.
+
+==== Entry Flags
+
+Entry Flags are updated to add a low-latency flag.  The flags are
+defined such that an Entry cannot be both Low Latency and Persistent.
+The flags definition is backwards compatible with version 3.0's
+persistent flag.
+
+[cols="1,3"]
+|===
+|Bit Mask |Bit Value Meaning
+
+|0x03 (2 least significant bits) - Persistent / Low Latency
+
+|0x00: Entry is not persistent. The entry and its value will not be retained
+across a server restart.
+
+0x01: Entry is persistent. Updates to the value are automatically saved and
+the entry will be automatically created and the last known value restored when
+the server starts.
+
+0x02: Entry is low latency. The entry's value will be updated via UDP
+and will not be retained across a server restart.
+
+|0xFC
+|Reserved
+|===
+
+=== API
+
+* Add the flag definition for low latency.
+
+* Add a separate update rate for low latency:
+
+[source,c]
+void NT_SetLowLatencyUpdateRate(double interval);
+
+The Flush() API is not changed; instead, calling this function will
+flush both normal and low latency entries, but possibly at different
+rates due to different implementation-defined rate limits (see
+<<implementation>>).
+
+=== Implementation
+
+The NTcore implementation of NetworkTables currently rate-limits
+Flush() calls such that updates are sent via TCP no more frequently
+than every 100 ms.  The implementation intent is to retain the 100 ms
+rate limit for TCP but lower it to 20 ms for UDP.  This latter rate
+matches the standard FRC UDP packet rate for DS-robot communications,
+possibly enabling packet combining at the 802.11n layer.
+
+== Drawbacks
+
+* Increased packet traffic and potentially increased airtime.  While
+this is true today for team-created UDP implementations, providing
+this functionality in NetworkTables will increase usage, particularly
+if tools such as GRIP start defaulting to low-latency entries.
+
+== Alternatives
+
+* Reduce rate limit of TCP updates to 30 ms or less.  This requires no
+update to the protocol, just a change to the rate limit, but does not
+actually solve the underlying issue, as this may actually result in
+much higher latency in the case of packet loss requiring retransmits
+of (now stale) data.
+
+* Implement separate UDP client/server independent of NetworkTables.
+While successfully used by teams who have rolled their own
+implementations, for general use this approach loses the benefits that
+NetworkTables provides for ease of use (such as a named value/type
+system) and provides no tangible benefits over this proposal.
+
+* Do nothing.  Teams will continue to "roll their own" UDP clients and
+servers or accept the existing NetworkTables processing latency.
+
+== Unresolved Questions
+
+* Should there be separate UDP and TCP flush calls?  Given the
+separate rate limits this doesn't seem like it's necessary.
+
+* Should TCP_NODELAY still be used for TCP?  Users still will likely
+have the expectation data arrives in a timely fashion, and retaining
+this allows for reliable but only slightly higher latency updates.
