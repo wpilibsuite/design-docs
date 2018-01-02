@@ -1,7 +1,7 @@
 = Version Generation
 :toc: macro
 :sectanchors:
-:source-highligher: pygments
+:source-highlighter: pygments
 :pygments-style: colorful
 
 toc::[]
