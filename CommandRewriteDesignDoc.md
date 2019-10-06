@@ -17,17 +17,17 @@ The areas for improvement in the current command framework cleave generally into
 3.  Restrictive API design.
 4.  Clutter.
 
-### Problem 1: The Code Is Poorly-Organized
+### Readability and maintainability
 
 Despite the relatively simple API, the underlying code of the Command-based libraries is difficult to read and to maintain, in large part due to a highly-confusing structure.  The `Scheduler` class is particularly notorious - the code is poorly-documented, difficult to follow, and uses a large array of custom implementations for features that have since become standard Java utilities.  Both `Command` and `CommandGroup` are quite lengthy and difficult-to-follow, with the comments warning about various potential violations-of-assumptions re: the scheduling state of the commands but without any clear guide to what those actual assumptions are.  `Subsystem` contains a lot of unncessary state which is modified from multiple other places, which also tends to cause errors in user code.
 
-### Problem 2: It Is Not Clear What Each Class Is Supposed to Be Responsible For
+### Encapsulation and separation of responsibilites
 
 Despite its name, `Scheduler` does not really handle most of the work of scheduling commands.  `Command` has an API that suggests it functions merely as a state machine abstraction of user code, but in fact contains the lion's share of scheduling state.  `Subsystem` is *mostly* responsible for managing its own default command, except for the parts that are handled in `Scheduler`.  While the names of the objects in the library imply a fairly reasonable division of responsibilities, this is not followed in practice, and the resulting control flow is confusing.
 
 In particular, `Scheduler`'s status as a singleton has been quite badly abused, resulting in unpredictable and very rigid coupling to distant parts of the library.  The shunting of actual scheduling logic into `Command` makes it difficult to ascertain where in the code one would need to go to access a given piece of information about the robot state.  The simultaneous handling of `Subsystem` requirements by `Scheduler` and `CommandGroup` makes it unclear how one is supposed to check the current status of a `Subsystem` - as a result, knowledge of running commands has been needlessly duplicated in `Subsystem`, introducing both confusion and potential failure-states.
 
-### Problem 3: The Code Is Not Flexible In Places Where It Could Be
+### Restrictive API design
 
 Because the division-of-responsibilities is so ambiguous, large amounts of state have leaked into almost every class in the library.  As a result, almost nothing is an interface, while almost everything is an abstract class.  As Java does not support multiple inheritance, this is a problem - mandating that `Command`s and `Subsystem`s inherit from a library class places a fairly heavy burden on the potential inheritance structure of team code.  Given that teams (and the `Scheduler` itself) only really substantially interact with these classes through method overrides, this makes little sense.
 
@@ -35,7 +35,7 @@ Additionally, `CommandGroup`, while an *extremely powerful* class, has its utili
 
 Finally, the API has been designed almost exclusively for use through the subclassing of `Command` and `CommandGroup`.  Exceptions to this pattern do exist (e.g. `InstantCommand`), but much Command-based code is needlessly verbose.  The API's classes are, by-and-large, not usable as-is; they are usable only as foundations for user implementations.  This makes it unduly difficult for new teams to accomplish simple tasks, such as configuring working drive code, in comparison to a simple state machine in `Robot.java`.  As the benefits of the Command-based framework are not seen until teams begin to attempt more-complicated robot functionality, many teams who are initially discouraged by this end up without those benefits when they are needed; and even teams that stick with it are saddled with unnecessary verbosity for simple tasks.
 
-### Problem 4: The API Is Cluttered
+### API clutter
 
 Because of deeper issues with separation-of-concerns between the Command-based libraries and the `Sendable` implementation, many `Command`s have long lists of overloaded constructors and other cruft that make the code difficult to navigate and provide little useful functionality to the users.  The `PIDCommand` class is a particularly egregious example.
 
