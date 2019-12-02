@@ -207,7 +207,7 @@ void cancelCommand(Command... commands);
 void cancelAll();
 ```
 
-Forceably ends the given commands, if they are currently scheduled.  The commands will have `end(true)` called, rather than `end(false)` methods.  Note that a command can be cancelled ever if it is not scheduled as `interruptible` - the `interruptible` tag *only* determines if the command can be interrupted by *another command* through its requirements.
+Forceably ends the given commands, if they are currently scheduled.  The commands will have `end(true)` called, rather than `end(false)` methods.  Note that a command can be cancelled even if it is not scheduled as `interruptible` - the `interruptible` tag *only* determines if the command can be interrupted by *another command* through its requirements.
 
 ##### Querying command state
 
