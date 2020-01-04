@@ -68,7 +68,7 @@ default boolean isFinished() { return true; }
 default boolean runsWhenDisabled() { return false; }
 ```
 
-These work exactly as before, with the exception of `end()`, which has been modified to fill the roll of both `end()` and `interrupted()` in the previous library (the method param indicates whether the command finished normally, or was interrupted).  For the rest of the document, when we say a command is "interrupted," this means `end(true)` is called; when we say "finished," we mean `end(false)` is called.
+These work exactly as before, with the exception of `end()`, which has been modified to fill the role of both `end()` and `interrupted()` in the previous library (the method param indicates whether the command finished normally, or was interrupted).  For the rest of the document, when we say a command is "interrupted," this means `end(true)` is called; when we say "finished," we mean `end(false)` is called.
 
 The methods are defaulted for convenience, so that overriding is not necessary if one does not wish to use one of them.  The only difference is that to specify run-when-disabled behavior, one must now override the `runsWhenDisabled()` method instead of calling a `setRunsWhenDisabled()` method (which is not feasible, as `Command` is no longer stateful).
 
