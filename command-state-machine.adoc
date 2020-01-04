@@ -1,0 +1,886 @@
+= Command-Based Finite State Machine
+:toc: macro
+:sectanchors:
+:source-highligher: pygments
+:pygments-style: colorful
+
+toc::[]
+
+== Summary
+
+Provide a Moore-style finite state machine for sequencing of Commands
+in a Command-based robot.  Each state consists of a set of commands
+and/or arbitrary user code.  Transitions between states occur based on
+user-specified conditions such as a command finishing or a sensor or
+variable being a certain value (implemented via the use of lambda
+functions).  There can be multiple transitions into or out of any
+state and there are no restrictions on what order the states execute
+in.  When exiting a state, all Commands within the state are cancelled
+(if not already finished).
+
+== Motivation
+
+While CommandGroup allows simple sequencing of Commands, it is limited
+to linear sequences of potentially parallel commands with no
+integrated support for branching or exiting a step of the sequence
+early (other than based on time).  The proposed addition of
+ConditionalCommand helps put the transition logic at a higher level,
+but still requires each "branch" be either a Command or a
+CommandGroup.  It's very convoluted to try to express sub-branching or
+rejoining without a proliferation of custom CommandGroups.
+Additionally, as the exit condition for each step is only based on
+isFinished of the currently running Command rather than on some
+external event, if you want an external event to cause a command to
+end early (but only in one place in the autonomous routine) you have
+to write two separate Commands that are identical except for the
+isFinished method.  The real problem this is trying to solve is the
+lack of reusability of Commands when developing complicated autonomous
+routines.
+
+One example use case might be a two ball autonomous that crosses a
+barrier in the 2016 FRC game.  The robot needs to drop off the ball,
+cross the barrier, shoot, back over the barrier, pick up the 2nd ball,
+drive over the barrier a second time, and shoot the second ball.
+You've already written existing Commands/CommandGroups for driving,
+pickup, auto-aim and shoot, and sensors that tell you whether the
+robot got a ball and how much the robot is tilted (which you want to
+use for detecting whether the robot has crossed a barrier).  Because
+the robot is crossing a barrier, the robot may sometimes not pick up
+the second ball--if that happens, the robot should stay in the midzone
+and do something else instead (e.g. turn 180 degrees).  In addition,
+the autonomous needs to have slight variants for different starting
+positions (e.g. pre-turn some amount before shooting).
+
+Today, this is quite convoluted to do in command-based programming.
+You will end up needing to write separate Commands / CommandGroups for
+different phases of the process e.g. "drive over barrier".  While this
+is good (for reuse), information about the different starting
+positions must be stored in a global location or the subsystem and
+specific commands developed that turn based on that information
+(rather than using the existing turn commands, because they can't be
+turn different amounts dynamically or end early based on other runtime
+conditions).  The branch at the end could be implemented with a
+ConditionalCommand but if it also depends on starting location, that
+proliferates commands even more.  And this isn't even counting the
+complexity driven by _different_ barriers.
+
+== Design
+
+The `CommandStateMachine` class is designed to be the base class of
+all user state machines (similar to how the `CommandGroup` and
+`Command` classes are used).  As with `CommandGroup`, user code is
+expected to set up the state machine states and transitions in the
+constructor.
+
+=== States
+
+New states can be added in the `CommandStateMachine` constructor by
+calling the <<csm-addstate>> method.  A <<state>> consists of a set of
+commands (stored as a list) and a list of exit conditions (transitions
+to other states).  A state can also have arbitrary code (e.g. not part
+of a command) that runs either on entry to the state, exit from the
+state, or periodically while the state machine is in the state.
+
+=== State Transitions
+
+Transitions between states can be added via either operations on
+<<state>> objects directly or via wrapper functions in the
+`CommandStateMachine` class.  Multiple transitions can be added to a
+single state; they will be evaluated in the order added.
+
+Because of the need for transitions to be linked to particular states,
+it's recommended that user code be structured to create all of the
+states first and then add the transitions between them.
+
+=== Initial State
+
+The state machine's initial state defaults to the first state added,
+but can be set to a different state with <<csm-setinitial>>.  If no
+states are added the state machine immediately finishes.
+
+=== Finishing
+
+The state machine command finishes (e.g. its `Command::isFinished`
+method returns true) when it transitions to the built in "finished"
+state.  A reference to this state can be obtained with
+<<csm-finished>>.  Commands cannot be added to the finished state.
+
+=== Subsystem Requirements
+
+Similar to `CommandGroup`, the CommandStateMachine's subsystem
+requirements are the superset of all of subsystem requirements of all
+of the commands added to all of the states.  This means the entire
+CommandStateMachine will be interrupted if any Command outside of the
+CommandStateMachine that requires these subsystems is executed (unless
+the CommandStateMachine is made non-interruptable).
+
+The Commands within a single state cannot have overlap between their
+subsystem requirements.  This will be checked as each command is added
+and will result in an exception if violated.
+
+[[csm]]
+=== CommandStateMachine Class
+
+==== State Machine Configuration Functions
+
+[[csm-addstate]]
+===== CSM.addState()
+
+[source,java]
+State addState();
+State addState(Command... command);
+State addState(List<Command> commands);
+
+[source,cpp]
+State* AddState();
+State* AddState(Command* cmd1, ...);
+State* AddState(std::unique_ptr<Command> cmd1, ...);
+State* AddState(std::initializer_list<Command*> commands);
+State* AddState(std::initializer_list<std::unique_ptr<Command>> commands);
+
+Create a state and add it to the state machine.  Returns a new
+instance of <<state,State>>.  Commands can be added to states either
+as part of the parameter list to `addState()`, or via calling
+<<csm-addcommand>> or <<state-addcommand>>.
+
+Java Example:
+
+[source,java]
+----
+State s1 = addState(new CCommand(...));
+State s2 = addState(new ACommand(...), new BCommand(...));
+State s3 = addState();
+addCommand(s3, new DCommand(...));
+s3.addCommand(new ECommand(...));
+----
+
+{cpp} Example:
+
+[source,cpp]
+----
+State* s1 = AddState(new CCommand(...));
+State* s2 = AddState(new ACommand(...), new BCommand(...));
+State* s3 = AddState({new ACommand(...), new BCommand(...)});
+State* s4 = AddState();
+AddCommand(s4, new DCommand(...));
+s4->AddCommand(std::make_unique<ECommand>(...));
+----
+
+[[csm-finished]]
+===== CSM.finished()
+
+[source,java]
+State finished();
+
+[source,cpp]
+State* Finished();
+
+Returns the built-in "finished" `State`.  When this state is entered,
+the `CSM.isFinished` override returns true.  No commands may be added
+to the returned `State`.
+
+[[csm-setinitial]]
+===== CSM.setInitial()
+
+[source,java]
+void setInitial(State state);
+
+[source,cpp]
+void SetInitial(State* state);
+
+Sets the initial state.  The default initial state is the first state
+added.
+
+[[csm-addcommand]]
+===== CSM.addCommand()
+
+[source,java]
+Command addCommand(State state, Command command);
+void addCommand(State state, Callable<Command> makeCommand);
+
+[source,cpp]
+Command* AddCommand(State* state, Command* command);
+Command* AddCommand(State* state, std::unique_ptr<Command> command);
+void AddCommand(State* state, std::function<Command*()> makeCommand);
+void AddCommand(State* state, std::function<std::unique_ptr<Command>()> makeCommand);
+
+Adds a new command to a state.  Wrapper of <<state-addcommand>>.
+Returns the passed command (except for `Callable` and `std::function`
+versions).  These lines of code are equivalent:
+
+[source,java]
+----
+addCommand(s1, new Command(...));
+s1.addCommand(new Command(...));
+----
+
+[source,cpp]
+----
+AddCommand(s1, new Command(...));
+s1->AddCommand(new Command(...));
+AddCommand(s1, std::make_unique<Command>(...));
+s1->AddCommand(std::make_unique<Command>(...));
+----
+
+NOTE: In {cpp}, AddCommand takes ownership of the passed Command.  For
+ease of use, this can be done implicitly, but using `std::make_unique`
+instead is recommended for new code.
+
+The `Callable` (Java) and `std::function` ({cpp}) variants enable
+deferring creating the command until the state is entered.  This
+allows a parameterized command's parameter to be evaluated at the time
+the state is entered rather than at the time the state machine is
+created, e.g.:
+
+[source,java]
+addCommand(s1, () -> new DriveCommand(getDistanceToDrive()));
+
+[source,cpp]
+----
+AddCommand(s1, [=]() { return std::make_unique(DriveCommand,
+                                               GetDistanceToDrive()); });
+----
+
+[[csm-addcode]]
+===== CSM.addCode()
+
+[source,java]
+void addCode(State state, Runnable action);
+
+[source,cpp]
+void AddCode(State* state, std::function<void()> func);
+
+Adds arbitrary code to a state.  This code will be executed
+periodically while in the state.  Wrapper of <<state-addcode>>.  These
+lines of code are equivalent:
+
+[source,java]
+----
+addCode(s1, () -> { ... });
+s1.addCode(() -> { ... });
+----
+
+[source,cpp]
+----
+AddCode(s1, [=]() { ... });
+s1->AddCode([=]() { ... });
+----
+
+CAUTION: As with other Command code, the provided code should _not_
+block and should return as quickly as possible, as otherwise the
+entire command structure will be blocked.
+
+[[csm-addentrycode]]
+===== CSM.addEntryCode()
+
+[source,java]
+void addEntryCode(State state, Runnable action);
+
+[source,cpp]
+void AddEntryCode(State* state, std::function<void()> func);
+
+Adds arbitrary code to a state.  This code will be executed once when
+the state is entered.  Wrapper of <<state-addentrycode>>.  These lines
+of code are equivalent:
+
+[source,java]
+----
+addEntryCode(() -> { ... });
+s1.addEntryCode(() -> { ... });
+----
+
+[[csm-addexitcode]]
+===== CSM.addExitCode()
+
+[source,java]
+void addExitCode(State state, Runnable action);
+
+[source,cpp]
+void AddExitCode(State* state, std::function<void()> func);
+
+Adds arbitrary code to a state.  This code will be executed once when
+the state is exited.  Wrapper of <<state-addentrycode>>.  These lines
+of code are equivalent:
+
+[source,java]
+----
+addExitCode(() -> { ... });
+s1.addExitCode(() -> { ... });
+----
+
+==== State Machine Configuration Transition Functions
+
+Each of the state transition functions allows specifying an optional
+`code` parameter that can be used to have arbitrary code be executed
+when the condition is true (it will be executed as part of the state
+transition).
+
+[[csm-onevent]]
+===== CSM.onEvent()
+
+[source,java]
+void onEvent(State current, State next, Callable<Boolean> cond);
+void onEvent(State current, State next, Callable<Boolean> cond, Runnable code);
+
+[source,cpp]
+void OnEvent(State* current, State* next, std::function<bool()> cond);
+void OnEvent(State* current, State* next, std::function<bool()> cond,
+             std::function<void()> code);
+
+Configures a state to transition to a new state when a condition is
+true.  The condition is implemented as a function that will be called
+during execution of the state.  Wrapper of <<state-onevent>>.  These
+lines of code are equivalent:
+
+[source,java]
+----
+onEvent(s1, s2, () -> condition);
+s1.onEvent(s2, () -> condition);
+----
+
+[source,cpp]
+----
+onEvent(s1, s2, [=]() { return condition; });
+s1->onEvent(s2, [=]() { return condition; });
+----
+
+[[csm-whenallfinished]]
+===== CSM.whenAllFinished()
+
+[source,java]
+void whenAllFinished(State current, State next);
+void whenAllFinished(State current, State next, Runnable code);
+
+[source,cpp]
+void WhenAllFinished(State* current, State* next);
+void WhenAllFinished(State* current, State* next, std::function<void()> code);
+
+Configures a state to transition to a new state when all commands in
+the state have finished.  Wrapper of <<state-whenallfinished>>.  These
+lines of code are equivalent:
+
+[source,java]
+----
+whenAllFinished(s1, s2);
+s1.whenAllFinished(s2);
+
+onEvent(s1, s2, () -> s1.isAllCommandsFinished());
+s1.onEvent(s2, () -> s1.isAllCommandsFinished());
+----
+
+[source,cpp]
+----
+WhenAllFinished(s1, s2);
+s1->WhenAllFinished(s2);
+
+OnEvent(s1, s2, [=]() { return s1->isAllCommandsFinished(); });
+s1->OnEvent(s2, [=]() { return s1->isAllCommandsFinished(); });
+----
+
+[[csm-whenanyfinished]]
+===== CSM.whenAnyFinished()
+
+[source,java]
+void whenAnyFinished(State current, State next);
+void whenAnyFinished(State current, State next, Runnable code);
+
+[source,cpp]
+void WhenAnyFinished(State* current, State* next);
+void WhenAnyFinished(State* current, State* next, std::function<void()> code);
+
+Configures a state to transition to a new state when any of the
+commands in the state have finished.  Wrapper of
+<<state-whenanyfinished>>.  These lines of code are equivalent:
+
+[source,java]
+----
+whenAnyFinished(s1, s2);
+s1.whenAnyFinished(s2);
+
+onEvent(s1, s2, () -> s1.isAnyCommandFinished());
+s1.onEvent(s2, () -> s1.isAnyCommandFinished());
+----
+
+[source,cpp]
+----
+WhenAnyFinished(s1, s2);
+s1.WhenAnyFinished(s2);
+
+OnEvent(s1, s2, [=]() { return s1->IsAnyCommandFinished(); });
+s1->OnEvent(s2, [=]() { return s1->IsAnyCommandFinished(); });
+----
+
+[[csm-whentimeelapsed]]
+===== CSM.whenTimeElapsed()
+
+[source,java]
+void whenTimeElapsed(State current, State next, double seconds);
+void whenTimeElapsed(State current, State next, double seconds, Runnable code);
+
+[source,cpp]
+void WhenTimeElapsed(State* current, State* next, double seconds);
+void WhenTimeElapsed(State* current, State* next, double seconds,
+                     std::function<void()> code);
+
+Configures a state to transition to a new state when the state machine
+has spent the given amount of time in this state (as returned by
+<<state-elapsedtime>>.  Wrapper of <<state-whentimeelapsed>>.  These
+lines of code are equivalent:
+
+[source,java]
+----
+whenTimeElapsed(s1, s2, 3.0);
+s1.whenTimeElapsed(s2, 3.0);
+
+onEvent(s1, s2, () -> s1.elapsedTime() >= 3.0);
+s1.onEvent(s2, () -> s1.elapsedTime() >= 3.0);
+----
+
+[[csm-whentotaltimeelapsed]]
+===== CSM.whenTotalTimeElapsed()
+
+[source,java]
+void whenTotalTimeElapsed(State current, State next, double seconds);
+void whenTotalTimeElapsed(State current, State next, double seconds, Runnable code);
+
+[source,cpp]
+void WhenTotalTimeElapsed(State* current, State* next, double seconds);
+void WhenTotalTimeElapsed(State* current, State* next, double seconds,
+                          std::function<void()> code);
+
+Configures a state to transition to a new state when the given amount
+of time has elapsed since the state machine started operation.
+Wrapper of <<state-whentotaltimeelapsed>>.  These lines of code are
+equivalent:
+
+[source,java]
+----
+whenTotalTimeElapsed(s1, s2, 15.0);
+s1.whenTotalTimeElapsed(s2, 15.0);
+
+onEvent(s1, s2, () -> timeSinceInitialized() >= 15.0);
+s1.onEvent(s2, () -> timeSinceInitialized() >= 15.0);
+----
+
+[source,cpp]
+----
+WhenTotalTimeElapsed(s1, s2, 15.0);
+s1->WhenTotalTimeElapsed(s2, 15.0);
+
+OnEvent(s1, s2, [=]() { return TimeSinceInitialized() >= 15.0; });
+s1->OnEvent(s2, [=]() { return TimeSinceInitialized() >= 15.0; });
+----
+
+[[state]]
+=== State Class
+
+The `State` class is an inner helper class of `CommandStateMachine`.
+User code can use it directly or use the wrapper methods in
+`CommandStateMachine` to configure states (the two approaches are
+equivalent, so it's simply a question of style which to use).
+
+Some methods are designed to be called during creation of the state
+machine, while others are designed to be called during execution.  The
+implementation detects and reports these errors.
+
+==== State Configuration Functions
+
+[[state-addcommand]]
+===== State.addCommand()
+
+[source,java]
+Command addCommand(Command command);
+void addCommand(State state, Callable<Command> makeCommand);
+
+[source,cpp]
+Command* AddCommand(Command* command);
+Command* AddCommand(std::unique_ptr<Command> command);
+void AddCommand(State* state, std::function<Command*()> makeCommand);
+void AddCommand(State* state, std::function<std::unique_ptr<Command>()> makeCommand);
+
+Adds a new command to the state.  Returns the passed command (except
+for `Callable` and `std::function` versions).
+
+[[state-addcode]]
+===== State.addCode()
+
+[source,java]
+void addCode(Runnable action);
+
+[source,cpp]
+void AddCode(std::function<void()> func);
+
+Adds arbitrary code to the state.  This code will be executed
+periodically while in the state.
+
+[[state-addentrycode]]
+===== State.addEntryCode()
+
+[source,java]
+void addEntryCode(Runnable action);
+
+[source,cpp]
+void AddEntryCode(std::function<void()> func);
+
+Adds arbitrary code to the state.  This code will be executed once
+when the state is entered.
+
+[[state-addexitcode]]
+===== State.addExitCode()
+
+[source,java]
+void addExitCode(Runnable action);
+
+[source,cpp]
+void AddExitCode(std::function<void()> func);
+
+Adds arbitrary code to the state.  This code will be executed once
+when the state is exited.
+
+==== State Configuration Transition Functions
+
+Each of the state transition functions allows specifying an optional
+`code` parameter that can be used to have arbitrary code be executed
+when the condition is true (it will be executed as part of the state
+transition).
+
+[[state-onevent]]
+===== State.onEvent()
+
+[source,java]
+void onEvent(State next, Callable<Boolean> cond);
+void onEvent(State next, Callable<Boolean> cond, Runnable code);
+
+[source,cpp]
+void OnEvent(State* next, std::function<bool()> cond);
+void OnEvent(State* next, std::function<bool()> cond, std::function<void()> code);
+
+Configures the state to transition to a new state when a condition is
+true.  The condition is implemented as a function that will be called
+during execution of the state.
+
+[[state-whenallfinished]]
+===== State.whenAllFinished()
+
+[source,java]
+void whenAllFinished(State next);
+void whenAllFinished(State next, Runnable code);
+
+[source,cpp]
+void WhenAllFinished(State* next);
+void WhenAllFinished(State* next, std::function<void()> code);
+
+Configures the state to transition to a new state when all commands in
+the state have finished.
+
+[[state-whenanyfinished]]
+===== State.whenAnyFinished()
+
+[source,java]
+void whenAnyFinished(State next);
+void whenAnyFinished(State next, Runnable code);
+
+[source,cpp]
+void WhenAnyFinished(State* next);
+void WhenAnyFinished(State* next, std::function<void()> code);
+
+Configures the state to transition to a new state when any of the
+commands in the state have finished.
+
+[[state-whentimeelapsed]]
+===== State.whenTimeElapsed()
+
+[source,java]
+void whenTimeElapsed(State next, double seconds);
+void whenTimeElapsed(State next, double seconds, Runnable code);
+
+[source,cpp]
+void WhenTimeElapsed(State* next, double seconds);
+void WhenTimeElapsed(State* next, double seconds, std::function<void()> code);
+
+Configures the state to transition to a new state when the state
+machine has spent the given amount of time in the state (as returned
+by <<state-elapsedtime>>).
+
+[[state-whentotaltimeelapsed]]
+===== State.whenTotalTimeElapsed()
+
+[source,java]
+void whenTotalTimeElapsed(State next, double seconds);
+void whenTotalTimeElapsed(State next, double seconds, Runnable code);
+
+[source,cpp]
+void WhenTotalTimeElapsed(State* next, double seconds);
+void WhenTotalTimeElapsed(State* next, double seconds, std::function<void()> code);
+
+Configures the state to transition to a new state when the given
+amount of time has elapsed since the state machine started operation.
+
+[[state-execution-functions]]
+==== State Execution Functions
+
+It is an error to call any of these functions when the state is not
+the current state.  This is to help find bugs such as the following:
+
+[source,java]
+s1.onEvent(s2, () -> s2.elapsedTime() >= 2.0);
+
+which is erroneously checking the elapsed time of the _next_ state
+rather than the _current_ state.
+
+[[state-elapsedtime]]
+===== State.elapsedTime()
+
+[source,java]
+double elapsedTime();
+
+[source,cpp]
+double ElapsedTime() const;
+
+Returns the amount of time (in seconds) that has elapsed since the
+state started execution.
+
+[source,java]
+s1.onEvent(s2, () -> s1.elapsedTime() >= 3.0 && someOtherCondition);
+
+[[state-isallcommandfinished]]
+===== State.isAllCommandsFinished()
+
+[source,java]
+boolean isAllCommandsFinished();
+
+[source,cpp]
+bool IsAllCommandsFinished() const;
+
+Returns whether all commands in the state have finished execution.
+Always returns true if there are no commands in the state.
+
+[source,java]
+s1.onEvent(s2, () -> s1.isAllCommandsFinished() && someOtherCondition);
+
+[[state-isanycommandfinished]]
+===== State.isAnyCommandFinished()
+
+[source,java]
+boolean isAnyCommandFinished();
+
+[source,cpp]
+bool IsAnyCommandFinished() const;
+
+Returns whether any commands in the state have finished execution.
+Always returns true if there are no commands in the state.
+
+[source,java]
+s1.onEvent(s2, () -> s1.isAnyCommandFinished() && someOtherCondition);
+
+===== State.isCommandFinished()
+
+[source,java]
+boolean isCommandFinished(int n);
+
+[source,cpp]
+bool IsCommandFinished(int n) const;
+
+Returns whether the specified command in the state have finished
+execution.  It is an error if `n` is negative or greater than or equal
+to the number of commands in the state.  The commands in the state are
+indexed in order of their addition.
+
+[source,java]
+s1.onEvent(s2, () -> s1.isCommandFinished(0));
+
+=== Examples
+
+For ease of reading, all of the examples show only the code in the
+constructor and none of the surrounding boilerplate.
+
+==== CommandGroup Equivalent Example
+
+This example is roughly equivalent to the following `CommandGroup`
+code.  The `CommandGroup` code is of course shorter; this example is
+intended to show the basic behavior of how `CommandStateMachine` works
+for those already familiar with `CommandGroup`.
+
+Note that the concept of CommandGroup "parallel" commands doesn't
+directly map to CommandStateMachine, as CommandGroup parallel commands
+keep running (are not cancelled unless a conflicting command ia run)
+and don't hold up later sequential commands.  This example tries to
+show both styles of operation.
+
+CommandGroup code:
+
+[source,java]
+----
+addParallel(new ArmToShotPosition());
+addSequential(new Drive(5));
+addSequential(new ArmToShotPosition()); // make sure it's reached the position
+addSequential(new AutoAim());
+addSequential(new ShootBall());
+addParallel(new ArmToIntakePosition());
+addSequential(new Drive(-2));
+// finish sequence even if arm isn't yet at intake position
+----
+
+CommandStateMachine equivalent:
+
+[source,java]
+----
+State s1 = addState(new Drive(5), new ArmToShotPosition());
+State s2 = addState(new AutoAim());
+State s3 = addState(new ShootBall());
+State s4 = addState(new Drive(-2), new ArmToIntakePosition());
+
+s1.whenAllFinished(s2);
+s2.whenAllFinished(s3);
+s3.whenAllFinished(s4);
+s4.onEvent(finished(), () -> s4.isCommandFinished(0));
+----
+
+==== More Complicated Example
+
+This example implements a conceptual two ball autonomous routine as
+discussed in the <<motivation>> section.  The states are named rather
+than numbered for readability.  This is a very complicated example to
+demonstrate man of the features, and many of the subsequences (e.g.
+pickupFirst) could be refactored into separate reusable sequences
+(either state machines or command groups) to make the top-level state
+machine simpler and even easier to follow.
+
+[source,java]
+----
+class TwoBallAuto extends CommandStateMachine {
+  private boolean missedFirst = false;
+
+  TwoBallAuto() {
+    State pickupFirst_s1 = addState(new DropBall());
+    State pickupFirst_s2 = addState(new RunIntake(), new LowerIntake());
+    State pickupFirst_s3 = addState(new Drive(0.5));
+
+    State crossLowBarForward = addState(new Drive(5));
+    // TurnAutoShoot is a CommandGroup sequence that turns, auto-aims,
+    // and shoots.  It does not return to the original angle.
+    State lowBarShot = addState(new TurnAutoShoot(10));
+    State lowBarTurnBack = addState(new DriveTurnAbs(0));
+    State crossLowBarBackward = addState(new Drive(-6), new RunIntake());
+    State crossLowBarForward2 = addState(new Drive(6));
+    State lowBarShot2 = addState(new TurnAutoShoot(10));
+
+    // This state is entered if we didn't get the first ball.  It's the
+    // first step in a sequence that turns and picks up the ball we just
+    // dropped.
+    State missedFirst_s1 = addState(new Drive(0.5));
+    // remember we missed the first ball so we don't try to get it
+    // later
+    missedFirst_s1.addEntryCode(() -> { missedFirst = true; });
+    State missedFirst_s2 = addState(new DriveTurn(-30));
+    State missedFirst_s3 = addState(new Drive(-0.5), new RunIntake());
+    State missedFirst_s4 = addState(new Drive(0.5));
+    State missedFirst_s5 = addState(new DriveTurnAbs(0));
+
+    pickupFirst_s1.whenAllFinished(pickupFirst_s2);
+    pickupFirst_s2.whenAllFinished(pickupFirst_s3);
+    // branch to missedFirst state if we didn't get the first ball,
+    // otherwise continue crossing the low bar.
+    pickupFirst_s3.onEvent(missedFirst_s1, () -> !Robot.intake.hasBall());
+    pickupFirst_s3.whenAllFinished(crossLowBarForward);
+
+    missedFirst_s1.whenAllFinished(missedFirst_s2);
+    missedFirst_s2.whenAllFinished(missedFirst_s3);
+    missedFirst_s3.whenAllFinished(missedFirst_s4);
+    missedFirst_s4.whenAllFinished(missedFirst_s5);
+    // if we didn't regain the ball we dropped, give up and stay in
+    // the neutral zone.
+    pickupFirst_s5.onEvent(finished(), () -> !Robot.intake.hasBall());
+    missedFirst_s5.whenAllFinished(crossLowBarForward);
+
+    crossLowBarForward.whenAllFinished(lowBarShot);
+    lowBarShot.whenAllFinished(lowBarTurnBack);
+    lowBarTurnBack.whenAllFinished(crossLowBarBackward);
+    crossLowBarBackward.whenAllFinished(crossLowBarForward2);
+    // didn't get the 2nd ball, stay in the neutral zone
+    crossLowBarForward2.onEvent(finished(), () -> !Robot.intake.hasBall());
+    crossLowBarForward2.whenAllFinished(lowBarShot2);
+    lowBarShot2.whenAllFinished(finished());
+  }
+}
+----
+
+== Drawbacks / Pitfalls
+
+=== Lambda Functions
+
+This design heavily relies on lambdas which are currently not used in
+WPILib user interfaces.  The concept is relatively simple, but using
+this feature will essentially require users to learn at least the
+basics of lambdas.
+
+In particular, {cpp} lambdas can be tricky to use due to lifetime
+issues, although they're relatively safe with copy (value) captures
+(`[=]()`) as recommended herein.  Reference captures are dangerous to
+use for out-of-scope callbacks, as it's easy to accidentally capture a
+non-pointer local variable (which will result in reading from random
+memory when the lambda is called after the enclosing scope has
+exited).  Accidentally copy-capturing a local variable is less
+problematic, as the result will be a defined (albeit potentially
+incorrect) operation instead of reading a random value.  This is also
+the reason why the {cpp} API uses pointers instead of references, as
+reference captures (`[&]()`) are required with non-copyable
+references.  Note lifetime issues are only problematic for variables
+declared in the constructor body; variables declared in the class body
+can be safely captured via `this` (this is because the lambda will
+never be called after the instance is destroyed).
+
+=== Referring to Incorrect State in Condition
+
+The following code contains a non-obvious bug; it is erroneously
+checking the elapsed time of the _next_ state rather than the
+_current_ state.
+
+[source,java]
+s1.onEvent(s2, () -> s2.elapsedTime() >= 2.0);
+
+To help prevent this, calling state execution functions such as
+<<state-elapsedtime>> when not in the corresponding will result in a
+runtime error, and common conditional cases such as the above have
+helper functions such as <<state-whentimeelapsed>>, so the above code
+could be rewritten correctly and more clearly as:
+
+[source,java]
+s1.whenTimeElapsed(s2, 2.0);
+
+but this bug is still a risk for more complex user-defined
+conditionals.
+
+== Alternatives
+
+`ConditionalCommand` provides a subset of this functionality but is
+limited in comparison.
+
+== Unresolved Questions
+
+* The current proposal cancels all commands within a state when
+transitioning to a new state.  This seems like the correct approach
+but is there any reason to not do this?
+
+* Re-entries into a single state will result in the commands within it
+being re-run.  Since it's possible for commands to retain data between
+executions this may result in unexpected behavior, but there's no good
+way to fix this, and users doing something like this will likely run
+into issues anyway in existing use cases (e.g. a button press running
+a command will run the same command instance multiple times).  Seems
+like this should just be documented.
+
+* Naming of state transition functions: addNextState? addTransition?
+onEvent?  Currently favoring the last one because it's the shortest
+and easy to type, plus it allows for the existence of functions like
+whenAllFinished.
+
+* How much error checking to do vs. how much freedom to allow?  E.g.
+should we warn on loopbacks to the same state?
+
+== Future Work
+
+* Add feature to RobotBuilder to build graphical state machine diagram
+and auto-generate code.  This proposal makes it really easy to
+generate state machine code due to its simple structure.
+
